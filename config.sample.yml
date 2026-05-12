@@ -1,0 +1,37 @@
+server:
+  host: "127.0.0.1"
+  port: 3399
+
+logger:
+  preset: "prod" # варианты: prod, dev
+  level: "info"  # варианты: debug, info, warn, error
+
+encoder:
+  file_pattern: '\.([^.]{8})\.' # регулярное выражение для фильтрации файлов
+  paths:                  # начальные пути директорий для обработки
+    - "/_astro"
+    - "/css"
+
+storage:
+  type: "local" # варианты: local, s3
+  local:
+    directory_path: "./storage"
+  s3:
+    bucket: ""
+    region: ""
+    endpoint: ""
+    prefix: ""
+    access_token: ""
+    secret_token: ""
+
+cache:
+  type: "memory" # варианты: memory, redis
+  memory:
+    capacity: 128
+  redis:
+    address: "localhost:6379"
+    password: ""
+    db: 0
+
+origin:
+  url: "http://127.0.0.1:8080"
