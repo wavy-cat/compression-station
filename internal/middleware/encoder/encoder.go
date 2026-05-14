@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/dlclark/regexp2/v2"
 	"github.com/gofiber/fiber/v3"
 	"github.com/wavy-cat/compression-station/pkg/cache"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
@@ -15,7 +16,7 @@ import (
 
 // Encoder сжимает контент от fetcher, если запрос удовлетволяет условиям (mime type, regex match)
 func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern string) func(c fiber.Ctx) error {
-	re := regexp.MustCompile(filePattern)
+	re := regexp2.MustCompile(filePattern)
 
 	return func(c fiber.Ctx) error {
 		if err := c.Next(); err != nil {
@@ -49,11 +50,23 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 		// Проверяем regex файла
 		path := strings.Split(c.Path(), "/")
 		filename := path[len(path)-1]
-		match := re.MatchString(filename)
-		found := re.FindString(filename)
+
+		match, err := re.MatchString(filename)
+		if err != nil {
+			return err
+		}
 		if !match {
 			return nil
 		}
+
+		foundMatch, err := re.FindStringMatch(filename)
+		if err != nil {
+			return err
+		}
+		if foundMatch == nil {
+			return nil
+		}
+		found := foundMatch.String()
 
 		// Добавляем заголовок, что файл можно использовать как словарь
 		var matchValue strings.Builder
