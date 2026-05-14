@@ -3,7 +3,6 @@ package encoder
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
@@ -12,10 +11,11 @@ import (
 	"github.com/wavy-cat/compression-station/pkg/cache"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
 	"github.com/wavy-cat/compression-station/pkg/storage"
+	"go.uber.org/zap"
 )
 
 // Encoder сжимает контент от fetcher, если запрос удовлетволяет условиям (mime type, regex match)
-func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern string) func(c fiber.Ctx) error {
+func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern string, logger *zap.Logger) func(c fiber.Ctx) error {
 	re := regexp2.MustCompile(filePattern)
 
 	return func(c fiber.Ctx) error {
@@ -25,11 +25,13 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 
 		// Отсеиваем, если содержимое уже сжато
 		if len(c.Response().Header.ContentEncoding()) != 0 {
+			logger.Debug("Skipping encoding: content already compressed")
 			return nil
 		}
 
 		// Отсеиваем, если Cache-Control не кеширует файл
 		if !slices.Contains(strings.Split(c.GetRespHeader("Cache-Control"), ", "), "public") {
+			logger.Debug("Skipping encoding: Cache-Control is not public")
 			return nil
 		}
 
@@ -44,6 +46,7 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 
 		// Проверяем, допускает ли MIME-тип сжатие
 		if !isMimeAllowed(mimeType) {
+			logger.Debug("Skipping encoding: MIME type not allowed", zap.String("mimeType", mimeType))
 			return nil
 		}
 
@@ -56,6 +59,7 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 			return err
 		}
 		if !match {
+			logger.Debug("Skipping encoding: filename does not match regex pattern", zap.String("filename", filename))
 			return nil
 		}
 
@@ -64,6 +68,7 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 			return err
 		}
 		if foundMatch == nil {
+			logger.Debug("Skipping encoding: regex match returned no result", zap.String("filename", filename))
 			return nil
 		}
 		found := foundMatch.String()
@@ -90,12 +95,14 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 		// Проверяем Accept-Encoding клиента
 		acceptEncoding := string(c.Request().Header.Peek("Accept-Encoding"))
 		if !strings.Contains(acceptEncoding, "dcz") {
+			logger.Debug("Skipping encoding: Accept-Encoding does not contain dcz", zap.String("acceptEncoding", acceptEncoding))
 			return nil
 		}
 
 		// Получаем хэш словаря
 		availableDictRaw := c.Get("Available-Dictionary")
 		if !strings.HasPrefix(availableDictRaw, ":") || !strings.HasSuffix(availableDictRaw, ":") {
+			logger.Debug("Skipping encoding: Available-Dictionary header format is invalid", zap.String("availableDict", availableDictRaw))
 			return nil
 		}
 		availableDict := availableDictRaw[1 : len(availableDictRaw)-1]
@@ -105,6 +112,7 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 		dictionary, err := getBundleByHash(store, cacheStore, availableDict)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotExists) {
+				logger.Debug("Skipping encoding: dictionary not found in storage", zap.String("hash", availableDict))
 				return nil
 			}
 			return err

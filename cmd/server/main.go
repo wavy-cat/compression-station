@@ -107,7 +107,7 @@ func main() {
 
 	for _, path := range cfg.Paths {
 		formatedPath := fmt.Sprintf("%s/*", path)
-		app.Use(formatedPath, encoder.Encoder(store, cache, cfg.FilePattern))
+		app.Use(formatedPath, encoder.Encoder(store, cache, cfg.FilePattern, logger))
 		app.Get(fmt.Sprintf("%s/*", path), fetcher.Fetcher(cfg.Url))
 	}
 
