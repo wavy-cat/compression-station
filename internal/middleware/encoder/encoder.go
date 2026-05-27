@@ -26,112 +26,160 @@ func Encoder(store storage.Storage, cacheStore *cacheCompressorType, filePattern
 			return err
 		}
 
-		// Отсеиваем, если содержимое уже сжато
-		if len(c.Response().Header.ContentEncoding()) != 0 {
-			logger.Debug("Skipping encoding: content already compressed")
+		if reason, ok := isValidRequest(c, re); !ok {
+			logger.Debug("skipping encoding", zap.String("reason", reason), zap.String("path", c.Path()))
 			return nil
 		}
 
-		// Отсеиваем, если Cache-Control не кеширует файл
-		if !slices.Contains(strings.Split(c.GetRespHeader("Cache-Control"), ", "), "public") {
-			logger.Debug("Skipping encoding: Cache-Control is not public")
-			return nil
-		}
-
-		// Получаем Content-Type
-		contentType := string(c.Response().Header.ContentType())
-
-		mimeType := contentType
-		if idx := strings.IndexByte(contentType, ';'); idx != -1 {
-			mimeType = contentType[:idx]
-		}
-		mimeType = strings.TrimSpace(mimeType)
-
-		// Проверяем, допускает ли MIME-тип сжатие
-		if !isMimeAllowed(mimeType) {
-			logger.Debug("Skipping encoding: MIME type not allowed", zap.String("mimeType", mimeType))
-			return nil
-		}
-
-		// Проверяем regex файла
-		path := strings.Split(c.Path(), "/")
-		filename := path[len(path)-1]
-
-		match, err := re.MatchString(filename)
+		err := addHeaders(c, re)
 		if err != nil {
-			return err
-		}
-		if !match {
-			logger.Debug("Skipping encoding: filename does not match regex pattern", zap.String("filename", filename))
+			logger.Error("error adding headers", zap.Error(err), zap.String("path", c.Path()))
 			return nil
 		}
 
-		foundMatch, err := re.FindStringMatch(filename)
-		if err != nil {
-			return err
-		}
-		if foundMatch == nil {
-			logger.Debug("Skipping encoding: regex match returned no result", zap.String("filename", filename))
-			return nil
-		}
-		found := foundMatch.String()
-
-		// Добавляем заголовок, что файл можно использовать как словарь
-		var matchValue strings.Builder
-		for _, p := range path[0 : len(path)-1] {
-			matchValue.WriteString(p)
-			matchValue.WriteString("/")
-		}
-		// Разбиваем filename на части по вхождению matched-подстроки,
-		// каждую часть экранируем, между ними вставляем "*"
-		parts := strings.SplitN(filename, found, 2)
-		matchValue.WriteString(escapeGlob(parts[0]))
-		matchValue.WriteString("*")
-		if len(parts) == 2 {
-			matchValue.WriteString(escapeGlob(parts[1]))
-		}
-		c.Set("Use-As-Dictionary", fmt.Sprintf(`match="%s"`, matchValue.String()))
-
-		// Добавляем Vary
-		c.Set("Vary", "Available-Dictionary, Accept-Encoding")
-
-		// Проверяем Accept-Encoding клиента
+		// Проверяем, что клиент поддерживает dcz в заголовке Accept-Encoding
 		acceptEncoding := string(c.Request().Header.Peek("Accept-Encoding"))
 		if !strings.Contains(acceptEncoding, "dcz") {
-			logger.Debug("Skipping encoding: Accept-Encoding does not contain dcz", zap.String("acceptEncoding", acceptEncoding))
+			logger.Debug("skipping encoding",
+				zap.String("reason", "Accept-Encoding does not contain dcz"),
+				zap.String("acceptEncoding", acceptEncoding))
 			return nil
 		}
 
 		// Получаем хэш словаря
-		availableDictRaw := c.Get("Available-Dictionary")
-		if !strings.HasPrefix(availableDictRaw, ":") || !strings.HasSuffix(availableDictRaw, ":") {
-			logger.Debug("Skipping encoding: Available-Dictionary header format is invalid", zap.String("availableDict", availableDictRaw))
+		adValue := c.Get("Available-Dictionary")
+		if !isValidADHeaderFormat(adValue) {
+			logger.Debug("skipping encoding",
+				zap.String("reason", "Available-Dictionary header format is invalid"),
+				zap.String("availableDict", adValue))
 			return nil
 		}
-		hashAvailableDict := availableDictRaw[1 : len(availableDictRaw)-1]
-		hashAvailableDict = strings.ReplaceAll(hashAvailableDict, "/", "_")
-		hashAvailableDict = strings.ReplaceAll(hashAvailableDict, "+", "-")
+		adHash := extractAvailableDictionary(adValue)
 
 		// Получаем тело ответа
 		body := c.Response().Body()
 
-		compressor, err := getCompressor(hashAvailableDict, compressionLevel, cacheStore, store)
+		compressor, err := getCompressor(adHash, compressionLevel, cacheStore, store)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotExists) {
-				logger.Debug("Skipping encoding: dictionary not found in storage", zap.String("hash", hashAvailableDict))
+				logger.Debug("skipping encoding",
+					zap.String("reason", "dictionary not found in storage"),
+					zap.String("hash", adHash))
 				return nil
 			}
-			return err
+			logger.Error("error getting compressor", zap.Error(err), zap.String("hash", adHash), zap.String("path", c.Path()))
+			return nil
 		}
 
 		encodedBody := compressor.Compress(body)
 
 		// Добавляем заголовки
 		c.Set("Content-Encoding", "dcz")
-
 		c.Response().Header.SetContentLength(len(encodedBody))
+
 		return c.Send(encodedBody)
 	}
+}
+
+// extractAvailableDictionary removes surrounding ':' markers from Available-Dictionary and normalizes base64url chars.
+func extractAvailableDictionary(headerValue string) string {
+	availableDictHash := headerValue[1 : len(headerValue)-1]
+	availableDictHash = strings.ReplaceAll(availableDictHash, "/", "_")
+	availableDictHash = strings.ReplaceAll(availableDictHash, "+", "-")
+	return availableDictHash
+}
+
+// isValidADHeaderFormat reports whether headerValue matches the expected Available-Dictionary hash wrapper format.
+func isValidADHeaderFormat(headerValue string) bool {
+	const sha256Len = 32
+	return strings.HasPrefix(headerValue, ":") &&
+		strings.HasSuffix(headerValue, ":") &&
+		len(headerValue) == sha256Len+2
+}
+
+// isValidRequest validates whether the current response is eligible for encoding.
+func isValidRequest(c fiber.Ctx, re *regexp2.Regexp) (string, bool) {
+	// Отсеиваем, если содержимое уже сжато
+	if len(c.Response().Header.ContentEncoding()) != 0 {
+		return "content already compressed", false
+	}
+
+	// Отсеиваем, если Cache-Control не кеширует файл
+	if !slices.Contains(strings.Split(c.GetRespHeader("Cache-Control"), ", "), "public") {
+		return "Cache-Control is not public", false
+	}
+
+	// Получаем Content-Type
+	contentType := string(c.Response().Header.ContentType())
+
+	mimeType := contentType
+	if idx := strings.IndexByte(contentType, ';'); idx != -1 {
+		mimeType = contentType[:idx]
+	}
+	mimeType = strings.TrimSpace(mimeType)
+
+	// Проверяем, допускает ли MIME-тип сжатие
+	if !isMimeAllowed(mimeType) {
+		return "MIME type not allowed", false
+	}
+
+	// Проверяем regex файла
+	path := strings.Split(c.Path(), "/")
+	filename := path[len(path)-1]
+
+	match, err := re.MatchString(filename)
+	if err != nil {
+		return fmt.Sprintf("error: %v", err), false
+	}
+	if !match {
+		return "filename does not match regex pattern", false
+	}
+
+	return "", true
+}
+
+// addHeaders adds the `Use-As-Dictionary` and `Vary` headers to the response
+func addHeaders(c fiber.Ctx, re *regexp2.Regexp) error {
+	match, err := getMatchPattern(c.Path(), re)
+	if err != nil {
+		return err
+	}
+	c.Set("Use-As-Dictionary", fmt.Sprintf(`match="%s"`, match))
+
+	c.Set("Vary", "Available-Dictionary, Accept-Encoding")
+
+	return nil
+}
+
+// getMatchPattern builds a glob-style match pattern from pathStr using the first regex match in the filename.
+func getMatchPattern(pathStr string, re *regexp2.Regexp) (string, error) {
+	path := strings.Split(pathStr, "/")
+	filename := path[len(path)-1]
+	foundMatch, err := re.FindStringMatch(filename)
+	if err != nil {
+		return "", err
+	}
+	if foundMatch == nil {
+		return "", errors.New("regex match returned no result")
+	}
+	found := foundMatch.String()
+
+	var matchValue strings.Builder
+	for _, p := range path[0 : len(path)-1] {
+		matchValue.WriteString(p)
+		matchValue.WriteString("/")
+	}
+
+	// Разбиваем filename на части по вхождению matched-подстроки,
+	// каждую часть экранируем, между ними вставляем "*"
+	parts := strings.SplitN(filename, found, 2)
+	matchValue.WriteString(escapeGlob(parts[0]))
+	matchValue.WriteString("*")
+	if len(parts) == 2 {
+		matchValue.WriteString(escapeGlob(parts[1]))
+	}
+
+	return matchValue.String(), nil
 }
 
 func getCompressor(hashDict string, compressionLevel int, cacheStore *cacheCompressorType, storage storage.Storage) (delta.Compressor, error) {
@@ -165,8 +213,5 @@ func escapeGlob(s string) string {
 }
 
 func isMimeAllowed(mimeType string) bool {
-	if slices.Contains(allowedMimeTypes, mimeType) {
-		return true
-	}
-	return false
+	return slices.Contains(allowedMimeTypes, mimeType)
 }
