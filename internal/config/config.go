@@ -11,8 +11,9 @@ type Logger struct {
 }
 
 type Encoder struct {
-	FilePattern string   `yaml:"file_pattern" env:"FILE_PATTERN" env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
-	Paths       []string `yaml:"paths" env:"PATHS" env-required:"true"`               // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
+	FilePattern      string   `yaml:"file_pattern" env:"FILE_PATTERN" env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
+	Paths            []string `yaml:"paths" env:"PATHS" env-required:"true"`               // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
+	CompressionLevel int      `yaml:"compression_level" env:"COMPRESSION_LEVEL" env-default:"3"`
 } // TODO: добавить excluded paths
 
 type Storage struct {
@@ -35,13 +36,7 @@ type StorageS3 struct {
 }
 
 type Cache struct {
-	CacheType CacheType   `yaml:"type" env:"CACHE_TYPE" env-default:"memory"`
-	Memory    CacheMemory `yaml:"memory"`
-	Redis     CacheRedis  `yaml:"redis"`
-}
-
-type CacheMemory struct {
-	Capacity uint `yaml:"capacity" env:"CACHE_MEMORY_CAPACITY" env-default:"128"`
+	Size int `yaml:"size" env:"CACHE_SIZE" env-default:"1024"`
 }
 
 type CacheRedis struct {

@@ -8,14 +8,17 @@ import (
 
 	"github.com/dlclark/regexp2/v2"
 	"github.com/gofiber/fiber/v3"
-	"github.com/wavy-cat/compression-station/pkg/cache"
+	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/wavy-cat/compression-station/pkg/delta"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
 	"github.com/wavy-cat/compression-station/pkg/storage"
 	"go.uber.org/zap"
 )
 
-// Encoder сжимает контент от fetcher, если запрос удовлетволяет условиям (mime type, regex match)
-func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern string, logger *zap.Logger) func(c fiber.Ctx) error {
+type cacheCompressorType = lru.Cache[string, delta.Compressor] // Use with lru.NewWithEvict()
+
+// Encoder сжимает контент от fetcher, если запрос удовлетворяет условиям (mime type, regex match)
+func Encoder(store storage.Storage, cacheStore *cacheCompressorType, filePattern string, compressionLevel int, logger *zap.Logger) func(c fiber.Ctx) error {
 	re := regexp2.MustCompile(filePattern)
 
 	return func(c fiber.Ctx) error {
@@ -105,26 +108,23 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 			logger.Debug("Skipping encoding: Available-Dictionary header format is invalid", zap.String("availableDict", availableDictRaw))
 			return nil
 		}
-		availableDict := availableDictRaw[1 : len(availableDictRaw)-1]
-		availableDict = strings.ReplaceAll(availableDict, "/", "_")
-		availableDict = strings.ReplaceAll(availableDict, "+", "-")
+		hashAvailableDict := availableDictRaw[1 : len(availableDictRaw)-1]
+		hashAvailableDict = strings.ReplaceAll(hashAvailableDict, "/", "_")
+		hashAvailableDict = strings.ReplaceAll(hashAvailableDict, "+", "-")
 
-		dictionary, err := getBundleByHash(store, cacheStore, availableDict)
+		// Получаем тело ответа
+		body := c.Response().Body()
+
+		compressor, err := getCompressor(hashAvailableDict, compressionLevel, cacheStore, store)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotExists) {
-				logger.Debug("Skipping encoding: dictionary not found in storage", zap.String("hash", availableDict))
+				logger.Debug("Skipping encoding: dictionary not found in storage", zap.String("hash", hashAvailableDict))
 				return nil
 			}
 			return err
 		}
 
-		// Получаем тело ответа
-		body := c.Response().Body()
-
-		encodedBody, err := dcz.CompressDict(dictionary, body)
-		if err != nil {
-			return err
-		}
+		encodedBody := compressor.Compress(body)
 
 		// Добавляем заголовки
 		c.Set("Content-Encoding", "dcz")
@@ -132,6 +132,24 @@ func Encoder(store storage.Storage, cacheStore cache.BytesCache, filePattern str
 		c.Response().Header.SetContentLength(len(encodedBody))
 		return c.Send(encodedBody)
 	}
+}
+
+func getCompressor(hashDict string, compressionLevel int, cacheStore *cacheCompressorType, storage storage.Storage) (delta.Compressor, error) {
+	if compressor, ok := cacheStore.Get(hashDict); ok {
+		return compressor, nil
+	}
+
+	dictionary, err := storage.Pull(hashDict)
+	if err != nil {
+		return nil, err
+	}
+
+	compressor, err := dcz.NewCompressor(dictionary, compressionLevel)
+	if err != nil {
+		return nil, err
+	}
+
+	return compressor, nil
 }
 
 func escapeGlob(s string) string {
@@ -144,26 +162,6 @@ func escapeGlob(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
-}
-
-func getBundleByHash(storage storage.Storage, cacheStorage cache.BytesCache, hash string) ([]byte, error) {
-	cached, err := cacheStorage.Pull(hash)
-	if err != nil && !errors.Is(err, cache.ErrNotExists) {
-		return nil, err
-	}
-	if cached != nil {
-		return cached, nil
-	}
-
-	content, err := storage.Pull(hash)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		_ = cacheStorage.Push(hash, content)
-	}()
-
-	return content, err
 }
 
 func isMimeAllowed(mimeType string) bool {

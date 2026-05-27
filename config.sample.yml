@@ -26,12 +26,7 @@ storage:
 
 cache:
   type: "memory" # варианты: memory, redis
-  memory:
-    capacity: 128
-  redis:
-    address: "localhost:6379"
-    password: ""
-    db: 0
+  size: 1024
 
 origin:
   url: "http://127.0.0.1:8080"

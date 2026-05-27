@@ -8,12 +8,11 @@ import (
 	"syscall"
 
 	"github.com/gofiber/fiber/v3"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/wavy-cat/compression-station/internal/config"
 	"github.com/wavy-cat/compression-station/internal/handler/fetcher"
 	"github.com/wavy-cat/compression-station/internal/middleware/encoder"
-	cache2 "github.com/wavy-cat/compression-station/pkg/cache"
-	"github.com/wavy-cat/compression-station/pkg/cache/memory"
-	"github.com/wavy-cat/compression-station/pkg/cache/redis"
+	"github.com/wavy-cat/compression-station/pkg/delta"
 	"github.com/wavy-cat/compression-station/pkg/storage"
 	"github.com/wavy-cat/compression-station/pkg/storage/local"
 	"github.com/wavy-cat/compression-station/pkg/storage/s3"
@@ -46,6 +45,7 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to build logger: %v", err))
 	}
+	//goland:noinspection ALL
 	defer logger.Sync()
 
 	// storage
@@ -74,22 +74,12 @@ func main() {
 	}(store)
 
 	// cache
-	var cache cache2.BytesCache
-	switch cfg.Cache.CacheType {
-	case config.Memory:
-		cache, err = memory.NewLRUCache(cfg.Cache.Memory.Capacity)
-	case config.Redis:
-		cache, err = redis.NewCache(cfg.Cache.Redis.Address, cfg.Cache.Redis.Password, cfg.Cache.Redis.DB)
-	}
+	compressorCache, err := lru.NewWithEvict(cfg.Size, func(key string, value delta.Compressor) {
+		value.Release()
+	})
 	if err != nil {
 		logger.Fatal("Failed to create cache", zap.Error(err))
 	}
-	defer func(cache cache2.BytesCache) {
-		err := cache.Close()
-		if err != nil {
-			logger.Error("Failed to close cache", zap.Error(err))
-		}
-	}(cache)
 
 	// web server
 	app := fiber.New()
@@ -107,7 +97,7 @@ func main() {
 
 	for _, path := range cfg.Paths {
 		formatedPath := fmt.Sprintf("%s/*", path)
-		app.Use(formatedPath, encoder.Encoder(store, cache, cfg.FilePattern, logger))
+		app.Use(formatedPath, encoder.Encoder(store, compressorCache, cfg.FilePattern, cfg.CompressionLevel, logger))
 		app.Get(fmt.Sprintf("%s/*", path), fetcher.Fetcher(cfg.Url))
 	}
 
