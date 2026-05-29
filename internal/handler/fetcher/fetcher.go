@@ -1,39 +1,45 @@
 package fetcher
 
 import (
-	"github.com/gofiber/fiber/v3"
-	"github.com/valyala/fasthttp"
+	"io"
+	"net/http"
+	"strings"
 )
 
-// Fetcher - запрашивает контент у origin и возвращает ответ в неизменном виде
+// Fetcher запрашивает контент у origin и возвращает ответ в неизменном виде
+func Fetcher(originURL string) http.HandlerFunc {
+	client := &http.Client{}
+	originURL = strings.TrimRight(originURL, "/")
 
-func Fetcher(originURL string) fiber.Handler {
-	client := &fasthttp.Client{}
+	return func(w http.ResponseWriter, r *http.Request) {
+		targetURL := originURL + r.URL.RequestURI()
 
-	return func(ctx fiber.Ctx) error {
-		req := fasthttp.AcquireRequest()
-		resp := fasthttp.AcquireResponse()
-		defer fasthttp.ReleaseRequest(req)
-		defer fasthttp.ReleaseResponse(resp)
-
-		// Копируем исходный запрос (метод, заголовки, тело)
-		ctx.Request().CopyTo(req)
-
-		// Собираем полный URL: origin + тот же URI что пришёл в запросе
-		req.SetRequestURI(originURL + string(ctx.Request().RequestURI()))
-
-		// Выполняем запрос
-		if err := client.Do(req, resp); err != nil {
-			return fiber.NewError(fiber.StatusBadGateway, err.Error())
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
 		}
 
-		// Копируем заголовки ответа
-		for key, value := range resp.Header.All() {
-			ctx.Set(string(key), string(value))
+		req.Header = r.Header.Clone()
+
+		resp, err := client.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		//goland:noinspection ALL
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
 		}
 
-		// Устанавливаем статус и тело ответа
-		ctx.Status(resp.StatusCode())
-		return ctx.Send(resp.Body())
+		w.WriteHeader(resp.StatusCode)
+
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			return
+		}
 	}
 }

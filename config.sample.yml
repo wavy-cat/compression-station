@@ -1,6 +1,10 @@
 server:
   host: "127.0.0.1"
   port: 3399
+  heartbeat:
+    enable: false
+    path: "/health"
+  shutdown_timeout: 10000 # ms
 
 logger:
   preset: "prod" # варианты: prod, dev
@@ -11,6 +15,7 @@ encoder:
   paths:                  # начальные пути директорий для обработки
     - "/_astro"
     - "/css"
+  compression_level: 2 # 1 - fastest, 2 - default, 3 - better compression, 4 - best compression
 
 storage:
   type: "local" # варианты: local, s3

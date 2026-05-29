@@ -2,16 +2,22 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
-	"github.com/gofiber/fiber/v3"
+	"github.com/go-chi/chi/v5"
+	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/wavy-cat/compression-station/internal/config"
 	"github.com/wavy-cat/compression-station/internal/handler/fetcher"
 	"github.com/wavy-cat/compression-station/internal/middleware/encoder"
+	logMiddleware "github.com/wavy-cat/compression-station/internal/middleware/logger"
 	"github.com/wavy-cat/compression-station/pkg/delta"
 	"github.com/wavy-cat/compression-station/pkg/storage"
 	"github.com/wavy-cat/compression-station/pkg/storage/local"
@@ -20,8 +26,12 @@ import (
 )
 
 func main() {
+	// cli args
+	configPath := flag.String("c", "config.yml", "path to config file")
+	flag.Parse()
+
 	// config
-	cfg, err := config.GetConfig("config.yml")
+	cfg, err := config.GetConfig(*configPath)
 	if err != nil {
 		panic(err)
 	}
@@ -81,46 +91,52 @@ func main() {
 		logger.Fatal("Failed to create cache", zap.Error(err))
 	}
 
-	// web server
-	app := fiber.New()
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	// routing
+	r := chi.NewRouter()
+	r.Use(logMiddleware.Logger(logger))
 
-	app.Use(func(c fiber.Ctx) error {
-		err := c.Next()
-		logger.Debug("HTTP Request",
-			zap.String("method", c.Method()),
-			zap.String("path", c.Path()),
-			zap.Error(c.Err()),
-			zap.String("ua", c.Get("User-Agent")))
-		return err
-	})
-
-	for _, path := range cfg.Paths {
-		formatedPath := fmt.Sprintf("%s/*", path)
-		app.Use(formatedPath, encoder.Encoder(store, compressorCache, cfg.FilePattern, cfg.CompressionLevel, logger))
-		app.Get(fmt.Sprintf("%s/*", path), fetcher.Fetcher(cfg.Url))
+	if cfg.Heartbeat.Enable {
+		r.Use(chiMiddleware.Heartbeat(cfg.Heartbeat.Path))
 	}
 
-	app.Get("/*", fetcher.Fetcher(cfg.Url))
+	for _, path := range cfg.Paths {
+		r.Route(path, func(r chi.Router) {
+			r.Use(encoder.Encoder(store, compressorCache, cfg.FilePattern, cfg.CompressionLevel, logger))
+			r.Get("/*", fetcher.Fetcher(cfg.Url))
+		})
+	}
+
+	r.HandleFunc("/*", fetcher.Fetcher(cfg.Url))
+
+	// web server
+	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	srv := &http.Server{
+		Addr:         addr,
+		WriteTimeout: time.Second * 15,
+		ReadTimeout:  time.Second * 15,
+		IdleTimeout:  time.Second * 60,
+		Handler:      r,
+	}
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
 	// Start server in a goroutine
 	logger.Info("Starting server...", zap.String("addr", addr))
 	go func() {
-		cfg := fiber.ListenConfig{
-			DisableStartupMessage: true,
-		}
-		if err := app.Listen(addr, cfg); err != nil {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal("Server error", zap.Error(err))
 		}
 	}()
 
 	// Wait for interrupt signal
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	<-stop
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout*time.Millisecond)
+	defer cancel()
 
 	logger.Info("Shutting down server...")
-	if err := app.Shutdown(); err != nil {
+	if err := srv.Shutdown(ctx); err != nil {
 		logger.Fatal("Server shutdown failed", zap.Error(err))
 	}
 	logger.Info("Server stopped gracefully")

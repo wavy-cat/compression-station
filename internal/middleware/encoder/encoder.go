@@ -1,14 +1,16 @@
 package encoder
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 
 	"github.com/dlclark/regexp2/v2"
-	"github.com/gofiber/fiber/v3"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/klauspost/compress/zstd"
 	"github.com/wavy-cat/compression-station/pkg/delta"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
 	"github.com/wavy-cat/compression-station/pkg/storage"
@@ -17,67 +19,121 @@ import (
 
 type cacheCompressorType = lru.Cache[string, delta.Compressor] // Use with lru.NewWithEvict()
 
+// responseRecorder перехватывает ответ от следующего обработчика,
+// чтобы мидлварь могла обработать тело и заголовки перед отправкой клиенту.
+type responseRecorder struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+	path       string
+}
+
+func newResponseRecorder(path string) *responseRecorder {
+	return &responseRecorder{
+		header:     make(http.Header),
+		statusCode: http.StatusOK,
+		path:       path,
+	}
+}
+
+func (r *responseRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	return r.body.Write(b)
+}
+
+func (r *responseRecorder) WriteHeader(statusCode int) {
+	r.statusCode = statusCode
+}
+
+// flush копирует накопленные заголовки, статус и тело в реальный ResponseWriter.
+func (r *responseRecorder) flush(w http.ResponseWriter) error {
+	for key, values := range r.header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(r.statusCode)
+	_, err := w.Write(r.body.Bytes())
+	return err
+}
+
 // Encoder сжимает контент от fetcher, если запрос удовлетворяет условиям (mime type, regex match)
-func Encoder(store storage.Storage, cacheStore *cacheCompressorType, filePattern string, compressionLevel int, logger *zap.Logger) func(c fiber.Ctx) error {
+func Encoder(store storage.Storage, cacheStore *cacheCompressorType, filePattern string, compressionLevel zstd.EncoderLevel, logger *zap.Logger) func(http.Handler) http.Handler {
 	re := regexp2.MustCompile(filePattern)
 
-	return func(c fiber.Ctx) error {
-		if err := c.Next(); err != nil {
-			return err
-		}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec := newResponseRecorder(r.URL.Path)
 
-		if reason, ok := isValidRequest(c, re); !ok {
-			logger.Debug("skipping encoding", zap.String("reason", reason), zap.String("path", c.Path()))
-			return nil
-		}
+			next.ServeHTTP(rec, r)
 
-		err := addHeaders(c, re)
-		if err != nil {
-			logger.Error("error adding headers", zap.Error(err), zap.String("path", c.Path()))
-			return nil
-		}
-
-		// Проверяем, что клиент поддерживает dcz в заголовке Accept-Encoding
-		acceptEncoding := string(c.Request().Header.Peek("Accept-Encoding"))
-		if !strings.Contains(acceptEncoding, "dcz") {
-			logger.Debug("skipping encoding",
-				zap.String("reason", "Accept-Encoding does not contain dcz"),
-				zap.String("acceptEncoding", acceptEncoding))
-			return nil
-		}
-
-		// Получаем хэш словаря
-		adValue := c.Get("Available-Dictionary")
-		if !isValidADHeaderFormat(adValue) {
-			logger.Debug("skipping encoding",
-				zap.String("reason", "Available-Dictionary header format is invalid"),
-				zap.String("availableDict", adValue))
-			return nil
-		}
-		adHash := extractAvailableDictionary(adValue)
-
-		// Получаем тело ответа
-		body := c.Response().Body()
-
-		compressor, err := getCompressor(adHash, compressionLevel, cacheStore, store)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotExists) {
-				logger.Debug("skipping encoding",
-					zap.String("reason", "dictionary not found in storage"),
-					zap.String("hash", adHash))
-				return nil
+			if reason, ok := isValidRequest(rec, r, re); !ok {
+				logger.Debug("skipping encoding", zap.String("reason", reason), zap.String("path", r.URL.Path))
+				_ = rec.flush(w)
+				return
 			}
-			logger.Error("error getting compressor", zap.Error(err), zap.String("hash", adHash), zap.String("path", c.Path()))
-			return nil
-		}
 
-		encodedBody := compressor.Compress(body)
+			if err := addHeaders(rec, r, re); err != nil {
+				logger.Error("error adding headers", zap.Error(err), zap.String("path", r.URL.Path))
+				_ = rec.flush(w)
+				return
+			}
 
-		// Добавляем заголовки
-		c.Set("Content-Encoding", "dcz")
-		c.Response().Header.SetContentLength(len(encodedBody))
+			// Проверяем, что клиент поддерживает dcz в заголовке Accept-Encoding
+			acceptEncoding := r.Header.Get("Accept-Encoding")
+			if !strings.Contains(acceptEncoding, "dcz") {
+				logger.Debug("skipping encoding",
+					zap.String("reason", "Accept-Encoding does not contain dcz"),
+					zap.String("acceptEncoding", acceptEncoding))
+				_ = rec.flush(w)
+				return
+			}
 
-		return c.Send(encodedBody)
+			// Получаем хэш словаря
+			adValue := r.Header.Get("Available-Dictionary")
+			if !isValidADHeaderFormat(adValue) {
+				logger.Debug("skipping encoding",
+					zap.String("reason", "Available-Dictionary header format is invalid"),
+					zap.String("availableDict", adValue))
+				_ = rec.flush(w)
+				return
+			}
+			adHash := extractAvailableDictionary(adValue)
+
+			// Получаем тело ответа
+			body := rec.body.Bytes()
+
+			compressor, err := getCompressor(adHash, compressionLevel, cacheStore, store)
+			if err != nil {
+				if errors.Is(err, storage.ErrNotExists) {
+					logger.Debug("skipping encoding",
+						zap.String("reason", "dictionary not found in storage"),
+						zap.String("hash", adHash))
+					_ = rec.flush(w)
+					return
+				}
+				logger.Error("error getting compressor", zap.Error(err), zap.String("hash", adHash), zap.String("path", r.URL.Path))
+				_ = rec.flush(w)
+				return
+			}
+
+			encodedBody := compressor.Compress(body)
+
+			// Добавляем заголовки и отправляем сжатый ответ
+			for key, values := range rec.header {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.Header().Set("Content-Encoding", "dcz")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(encodedBody)))
+
+			w.WriteHeader(rec.statusCode)
+			_, _ = w.Write(encodedBody)
+		})
 	}
 }
 
@@ -96,19 +152,19 @@ func isValidADHeaderFormat(headerValue string) bool {
 }
 
 // isValidRequest validates whether the current response is eligible for encoding.
-func isValidRequest(c fiber.Ctx, re *regexp2.Regexp) (string, bool) {
+func isValidRequest(rec *responseRecorder, r *http.Request, re *regexp2.Regexp) (string, bool) {
 	// Отсеиваем, если содержимое уже сжато
-	if len(c.Response().Header.ContentEncoding()) != 0 {
+	if len(rec.header.Get("Content-Encoding")) != 0 {
 		return "content already compressed", false
 	}
 
 	// Отсеиваем, если Cache-Control не кеширует файл
-	if !slices.Contains(strings.Split(c.GetRespHeader("Cache-Control"), ", "), "public") {
+	if !slices.Contains(strings.Split(rec.header.Get("Cache-Control"), ", "), "public") {
 		return "Cache-Control is not public", false
 	}
 
 	// Получаем Content-Type
-	contentType := string(c.Response().Header.ContentType())
+	contentType := rec.header.Get("Content-Type")
 
 	mimeType := contentType
 	if idx := strings.IndexByte(contentType, ';'); idx != -1 {
@@ -122,7 +178,7 @@ func isValidRequest(c fiber.Ctx, re *regexp2.Regexp) (string, bool) {
 	}
 
 	// Проверяем regex файла
-	path := strings.Split(c.Path(), "/")
+	path := strings.Split(r.URL.Path, "/")
 	filename := path[len(path)-1]
 
 	match, err := re.MatchString(filename)
@@ -137,14 +193,14 @@ func isValidRequest(c fiber.Ctx, re *regexp2.Regexp) (string, bool) {
 }
 
 // addHeaders adds the `Use-As-Dictionary` and `Vary` headers to the response
-func addHeaders(c fiber.Ctx, re *regexp2.Regexp) error {
-	match, err := getMatchPattern(c.Path(), re)
+func addHeaders(rec *responseRecorder, r *http.Request, re *regexp2.Regexp) error {
+	match, err := getMatchPattern(r.URL.Path, re)
 	if err != nil {
 		return err
 	}
-	c.Set("Use-As-Dictionary", fmt.Sprintf(`match="%s"`, match))
+	rec.header.Set("Use-As-Dictionary", fmt.Sprintf(`match="%s"`, match))
 
-	c.Set("Vary", "Available-Dictionary, Accept-Encoding")
+	rec.header.Set("Vary", "Available-Dictionary, Accept-Encoding")
 
 	return nil
 }
@@ -180,7 +236,7 @@ func getMatchPattern(pathStr string, re *regexp2.Regexp) (string, error) {
 	return matchValue.String(), nil
 }
 
-func getCompressor(hashDict string, compressionLevel int, cacheStore *cacheCompressorType, storage storage.Storage) (delta.Compressor, error) {
+func getCompressor(hashDict string, compressionLevel zstd.EncoderLevel, cacheStore *cacheCompressorType, storage storage.Storage) (delta.Compressor, error) {
 	if compressor, ok := cacheStore.Get(hashDict); ok {
 		return compressor, nil
 	}
@@ -194,6 +250,10 @@ func getCompressor(hashDict string, compressionLevel int, cacheStore *cacheCompr
 	if err != nil {
 		return nil, err
 	}
+
+	go func(hashDict string, compressor delta.Compressor) {
+		cacheStore.Add(hashDict, compressor)
+	}(hashDict, compressor)
 
 	return compressor, nil
 }

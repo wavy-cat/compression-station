@@ -1,8 +1,21 @@
 package config
 
+import (
+	"time"
+
+	"github.com/klauspost/compress/zstd"
+)
+
 type Server struct {
-	Host string `yaml:"host" env:"HOST" env-default:"127.0.0.1"`
-	Port uint16 `yaml:"port" env:"PORT" env-default:"3399"`
+	Host            string        `yaml:"host" env:"HOST" env-default:"127.0.0.1"`
+	Port            uint16        `yaml:"port" env:"PORT" env-default:"3399"`
+	Heartbeat       Heartbeat     `yaml:"heartbeat"`
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"SHUTDOWN_TIMEOUT" env-default:"10s"`
+}
+
+type Heartbeat struct {
+	Enable bool   `yaml:"enable" env:"ENABLE" env-default:"false"`
+	Path   string `yaml:"path" env:"PATH" env-default:"/health"`
 }
 
 type Logger struct {
@@ -11,9 +24,9 @@ type Logger struct {
 }
 
 type Encoder struct {
-	FilePattern      string   `yaml:"file_pattern" env:"FILE_PATTERN" env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
-	Paths            []string `yaml:"paths" env:"PATHS" env-required:"true"`               // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
-	CompressionLevel int      `yaml:"compression_level" env:"COMPRESSION_LEVEL" env-default:"3"`
+	FilePattern      string            `yaml:"file_pattern" env:"FILE_PATTERN" env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
+	Paths            []string          `yaml:"paths" env:"PATHS" env-required:"true"`               // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
+	CompressionLevel zstd.EncoderLevel `yaml:"compression_level" env:"COMPRESSION_LEVEL" env-default:"2"`
 } // TODO: добавить excluded paths
 
 type Storage struct {

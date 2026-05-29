@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/valyala/gozstd"
+	"github.com/klauspost/compress/zstd"
 	"github.com/wavy-cat/compression-station/pkg/delta"
 )
 
@@ -16,12 +16,15 @@ const (
 )
 
 type compressor struct {
-	cdict  *gozstd.CDict
-	header []byte // magic + dictHash, вычисляется один раз
+	encoder *zstd.Encoder
+	header  []byte // magic + dictHash, вычисляется один раз
 }
 
-func NewCompressor(dict []byte, level int) (delta.Compressor, error) {
-	cdict, err := gozstd.NewCDictLevel(dict, level)
+func NewCompressor(dict []byte, level zstd.EncoderLevel) (delta.Compressor, error) {
+	encoder, err := zstd.NewWriter(nil,
+		zstd.WithEncoderDictRaw(0, dict),
+		zstd.WithEncoderLevel(level),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build compression dictionary: %v", err)
 	}
@@ -31,13 +34,18 @@ func NewCompressor(dict []byte, level int) (delta.Compressor, error) {
 	header = append(header, dczMagic...)
 	header = append(header, dictHash[:]...)
 
-	return &compressor{cdict: cdict, header: header}, nil
+	return &compressor{encoder: encoder, header: header}, nil
 }
 
 func (c *compressor) Compress(content []byte) []byte {
-	return gozstd.CompressDict(c.header, content, c.cdict)
+	// EncodeAll дописывает сжатые данные к dst (здесь — к заранее
+	// подготовленному заголовку). Копируем header, чтобы не мутировать
+	// общий буфер при конкурентных вызовах.
+	dst := make([]byte, len(c.header), len(c.header)+len(content))
+	copy(dst, c.header)
+	return c.encoder.EncodeAll(content, dst)
 }
 
 func (c *compressor) Release() {
-	c.cdict.Release()
+	_ = c.encoder.Close()
 }

@@ -2,9 +2,6 @@
   <configuration default="false" name="Run server" type="GoApplicationRunConfiguration" factoryName="Go Application">
     <module name="compression-station" />
     <working_directory value="$PROJECT_DIR$" />
-    <envs>
-      <env name="CGO_ENABLED" value="1" />
-    </envs>
     <kind value="PACKAGE" />
     <package value="github.com/wavy-cat/compression-station/cmd/server" />
     <directory value="$PROJECT_DIR$" />
