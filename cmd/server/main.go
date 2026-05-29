@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -31,35 +30,33 @@ var (
 	commit  = "none"
 )
 
-func main() {
-	// cli args
+func parseCliArgs() string {
 	configPath := flag.String("c", "config.yml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("compression-station %s %s (%s %s/%s)\n",
+		fmt.Printf("compression-station %s %s (%s %s/%s)\n", //nolint:forbidigo // intentional version output to stdout
 			version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 
-	// config
-	cfg, err := config.GetConfig(*configPath)
-	if err != nil {
-		panic(err)
-	}
+	return *configPath
+}
 
-	// logger
-	level, err := zap.ParseAtomicLevel(cfg.Logger.Level)
+func getLogger(cfg config.Logger) *zap.Logger {
+	level, err := zap.ParseAtomicLevel(cfg.Level)
 	if err != nil {
 		panic(fmt.Sprintf("invalid log level: %v", err))
 	}
 
 	var zapConfig zap.Config
-	switch cfg.Logger.Preset {
+	switch cfg.Preset {
 	case config.ProdPreset:
 		zapConfig = zap.NewProductionConfig()
 	case config.DevPreset:
+		zapConfig = zap.NewDevelopmentConfig()
+	default:
 		zapConfig = zap.NewDevelopmentConfig()
 	}
 	zapConfig.Level = level
@@ -68,14 +65,16 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to build logger: %v", err))
 	}
-	//goland:noinspection ALL
-	defer logger.Sync()
+	return logger
+}
 
-	// storage
+func getStorage(cfg config.Storage) (storage.Storage, error) {
 	var store storage.Storage
-	switch cfg.Storage.StorageType {
+	var err error
+
+	switch cfg.StorageType {
 	case config.Local:
-		store, err = local.NewStorage(cfg.Storage.Local.DirectoryPath)
+		store, err = local.NewStorage(cfg.Local.DirectoryPath)
 	case config.S3:
 		store, err = s3.NewStorage(context.Background(), s3.Config{
 			Bucket:      cfg.S3.Bucket,
@@ -87,24 +86,18 @@ func main() {
 		})
 	}
 	if err != nil {
-		logger.Fatal("Failed to create storage", zap.Error(err))
-	}
-	defer func(store storage.Storage) {
-		err := store.Close()
-		if err != nil {
-			logger.Error("Failed to close storage", zap.Error(err))
-		}
-	}(store)
-
-	// cache
-	compressorCache, err := lru.NewWithEvict(cfg.Size, func(key string, value delta.Compressor) {
-		value.Release()
-	})
-	if err != nil {
-		logger.Fatal("Failed to create cache", zap.Error(err))
+		return nil, err
 	}
 
-	// routing
+	return store, nil
+}
+
+func setupRouting(
+	cfg config.Config,
+	logger *zap.Logger,
+	store storage.Storage,
+	cache *encoder.CompressorCache,
+) *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(logMiddleware.Logger(logger))
 
@@ -112,44 +105,90 @@ func main() {
 		r.Use(chiMiddleware.Heartbeat(cfg.Heartbeat.Path))
 	}
 
+	fetcherFunc, err := fetcher.Fetcher(&cfg.Url.URL)
+	if err != nil {
+		logger.Fatal("failed to create feather", zap.Error(err))
+	}
+
 	for _, path := range cfg.Paths {
 		r.Route(path, func(r chi.Router) {
-			r.Use(encoder.Encoder(store, compressorCache, cfg.FilePattern, cfg.CompressionLevel, logger))
-			r.Get("/*", fetcher.Fetcher(cfg.Url))
+			r.Use(encoder.Encoder(store, cache, cfg.FilePattern, cfg.CompressionLevel, logger))
+			r.Get("/*", fetcherFunc)
 		})
 	}
 
-	r.HandleFunc("/*", fetcher.Fetcher(cfg.Url))
+	r.HandleFunc("/*", fetcherFunc)
+
+	return r
+}
+
+func main() {
+	// cli args
+	configPath := parseCliArgs()
+
+	// config
+	cfg, err := config.GetConfig(configPath)
+	if err != nil {
+		panic(err)
+	}
+
+	// logger
+	logger := getLogger(cfg.Logger)
+	defer func(logger *zap.Logger) {
+		_ = logger.Sync()
+	}(logger)
+
+	// storage
+	store, err := getStorage(cfg.Storage)
+	if err != nil {
+		logger.Fatal("failed to initialize storage", zap.Error(err))
+	}
+	defer func(store storage.Storage) {
+		if err = store.Close(); err != nil {
+			logger.Error("Failed to close storage", zap.Error(err))
+		}
+	}(store)
+
+	// cache
+	compressorCache, err := lru.NewWithEvict(cfg.Size, func(_ string, value delta.Compressor) {
+		value.Release()
+	})
+	if err != nil {
+		logger.Fatal("Failed to create cache", zap.Error(err))
+	}
+
+	// routing
+	r := setupRouting(cfg, logger, store, compressorCache)
 
 	// web server
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	srv := &http.Server{
 		Addr:         addr,
-		WriteTimeout: time.Second * 15,
-		ReadTimeout:  time.Second * 15,
-		IdleTimeout:  time.Second * 60,
+		WriteTimeout: cfg.Timeouts.Write,
+		ReadTimeout:  cfg.Timeouts.Read,
+		IdleTimeout:  cfg.Timeouts.Idle,
 		Handler:      r,
 	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start server in a goroutine
+	// start server
 	logger.Info("Starting server...", zap.String("addr", addr))
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err = srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Fatal("Server error", zap.Error(err))
 		}
 	}()
 
-	// Wait for interrupt signal
+	// stop server
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeouts.Shutdown)
 	defer cancel()
 
 	logger.Info("Shutting down server...")
-	if err := srv.Shutdown(ctx); err != nil {
+	if err = srv.Shutdown(ctx); err != nil {
 		logger.Fatal("Server shutdown failed", zap.Error(err))
 	}
 	logger.Info("Server stopped gracefully")

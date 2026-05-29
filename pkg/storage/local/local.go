@@ -1,7 +1,7 @@
 package local
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,7 +21,7 @@ type Storage struct {
 // NewStorage creates a new file system storage with the specified directory for storage.
 func NewStorage(dir string) (*Storage, error) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err := os.MkdirAll(dir, 0o755)
+		err = os.MkdirAll(dir, 0o750)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +45,7 @@ func (fsc *Storage) Push(key string, value []byte) error {
 	compressed := encoder.EncodeAll(value, nil)
 
 	filePath := filepath.Join(fsc.dir, key)
-	return os.WriteFile(filePath, compressed, 0o644)
+	return os.WriteFile(filePath, compressed, 0o600)
 }
 
 func (fsc *Storage) Pull(key string) ([]byte, error) {
@@ -81,7 +81,7 @@ func (fsc *Storage) Close() error {
 	fsc.mu.Lock()
 	if fsc.closed {
 		fsc.mu.Unlock()
-		return fmt.Errorf("storage is already closed")
+		return errors.New("storage is already closed")
 	}
 	fsc.closed = true
 	fsc.mu.Unlock()
@@ -95,7 +95,7 @@ func (fsc *Storage) beginOperation() error {
 	defer fsc.mu.RUnlock()
 
 	if fsc.closed {
-		return fmt.Errorf("storage is closed")
+		return errors.New("storage is closed")
 	}
 
 	fsc.closingWg.Add(1)

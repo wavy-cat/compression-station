@@ -26,7 +26,7 @@ func NewCompressor(dict []byte, level zstd.EncoderLevel) (delta.Compressor, erro
 		zstd.WithEncoderLevel(level),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build compression dictionary: %v", err)
+		return nil, fmt.Errorf("failed to build compression dictionary: %w", err)
 	}
 
 	dictHash := sha256.Sum256(dict)

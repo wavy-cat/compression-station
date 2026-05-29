@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,7 +32,7 @@ type Config struct {
 
 func NewStorage(ctx context.Context, cfg Config) (storage.Storage, error) {
 	if cfg.Bucket == "" {
-		return nil, fmt.Errorf("s3 bucket is required")
+		return nil, errors.New("s3 bucket is required")
 	}
 
 	var loadOptions []func(*awsconfig.LoadOptions) error
@@ -44,10 +43,10 @@ func NewStorage(ctx context.Context, cfg Config) (storage.Storage, error) {
 
 	if cfg.AccessToken != "" || cfg.SecretToken != "" {
 		if cfg.AccessToken == "" {
-			return nil, fmt.Errorf("s3 access token is required when secret token is set")
+			return nil, errors.New("s3 access token is required when secret token is set")
 		}
 		if cfg.SecretToken == "" {
-			return nil, fmt.Errorf("s3 secret token is required when access token is set")
+			return nil, errors.New("s3 secret token is required when access token is set")
 		}
 
 		loadOptions = append(loadOptions, awsconfig.WithCredentialsProvider(

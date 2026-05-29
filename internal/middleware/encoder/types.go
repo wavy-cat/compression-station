@@ -1,5 +1,10 @@
 package encoder
 
+import (
+	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/wavy-cat/compression-station/pkg/delta"
+)
+
 var allowedMimeTypes = []string{
 	"text/html",
 	"text/richtext",
@@ -49,3 +54,5 @@ var allowedMimeTypes = []string{
 	"application/graphql+json",
 	"application/geo+json",
 }
+
+type CompressorCache = lru.Cache[string, delta.Compressor] // Use with lru.NewWithEvict()

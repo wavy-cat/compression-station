@@ -4,7 +4,11 @@ server:
   heartbeat:
     enable: false
     path: "/health"
-  shutdown_timeout: 10000 # ms
+  timeouts:
+    write: 15s
+    read: 15s
+    idle: 60s
+    timeout: 15s
 
 logger:
   preset: "prod" # варианты: prod, dev
