@@ -1,3 +1,5 @@
 .idea
 config.yml
 storage
+# Added by goreleaser init:
+dist/

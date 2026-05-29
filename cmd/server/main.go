@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -25,10 +26,22 @@ import (
 	"go.uber.org/zap"
 )
 
+var (
+	version = "dev"
+	commit  = "none"
+)
+
 func main() {
 	// cli args
 	configPath := flag.String("c", "config.yml", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("compression-station %s %s (%s %s/%s)\n",
+			version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		os.Exit(0)
+	}
 
 	// config
 	cfg, err := config.GetConfig(*configPath)
