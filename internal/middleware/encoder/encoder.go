@@ -91,10 +91,8 @@ func extractAvailableDictionary(headerValue string) string {
 
 // isValidADHeaderFormat reports whether headerValue matches the expected Available-Dictionary hash wrapper format.
 func isValidADHeaderFormat(headerValue string) bool {
-	const sha256Len = 32
 	return strings.HasPrefix(headerValue, ":") &&
-		strings.HasSuffix(headerValue, ":") &&
-		len(headerValue) == sha256Len+2
+		strings.HasSuffix(headerValue, ":")
 }
 
 // isValidRequest validates whether the current response is eligible for encoding.
