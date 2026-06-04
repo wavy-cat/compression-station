@@ -12,14 +12,16 @@ server:
 
 logger:
   preset: "prod" # варианты: prod, dev
-  level: "info"  # варианты: debug, info, warn, error
+  level: "info" # варианты: debug, info, warn, error
 
 encoder:
   file_pattern: '\.([^.]{8})\.' # регулярное выражение для фильтрации файлов
-  paths:                  # начальные пути директорий для обработки
+  paths: # начальные пути директорий для обработки
     - "/_astro"
     - "/css"
-  compression_level: 2 # 1 - fastest, 2 - default, 3 - better compression, 4 - best compression
+  prefer_encoder: "dcz" # предпочитаемый формат, если клиент поддерживает оба: dcz или dcb
+  zstd_compression_level: 2 # 1 - fastest, 2 - default, 3 - better compression, 4 - best compression
+  brotli_compression_level: 6 # 2-11; для статики попробуйте 9-11, если latency компрессии допустима
 
 storage:
   type: "local" # варианты: local, s3

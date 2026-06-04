@@ -14,6 +14,13 @@ const (
 	S3    StorageType = "s3"
 )
 
+type Encoding string
+
+const (
+	DCZ Encoding = "dcz"
+	DCB Encoding = "dcb"
+)
+
 type CacheType string
 
 const (

@@ -38,9 +38,6 @@ func NewCompressor(dict []byte, level zstd.EncoderLevel) (delta.Compressor, erro
 }
 
 func (c *compressor) Compress(content []byte) []byte {
-	// EncodeAll дописывает сжатые данные к dst (здесь — к заранее
-	// подготовленному заголовку). Копируем header, чтобы не мутировать
-	// общий буфер при конкурентных вызовах.
 	dst := make([]byte, len(c.header), len(c.header)+len(content))
 	copy(dst, c.header)
 	return c.encoder.EncodeAll(content, dst)

@@ -12,7 +12,9 @@ import (
 
 	"github.com/dlclark/regexp2/v2"
 	"github.com/klauspost/compress/zstd"
+	"github.com/wavy-cat/compression-station/internal/config"
 	"github.com/wavy-cat/compression-station/pkg/delta"
+	"github.com/wavy-cat/compression-station/pkg/delta/dcb"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
 	"github.com/wavy-cat/compression-station/pkg/storage"
 	"go.uber.org/zap"
@@ -65,7 +67,9 @@ func Encoder(
 	store storage.Storage,
 	cacheStore *CompressorCache,
 	filePattern string,
-	compressionLevel zstd.EncoderLevel,
+	zstdCompressionLevel zstd.EncoderLevel,
+	brotliCompressionLevel int,
+	preferEncoder config.Encoding,
 	logger *zap.Logger,
 ) func(http.Handler) http.Handler {
 	re := regexp2.MustCompile(filePattern)
@@ -76,13 +80,13 @@ func Encoder(
 
 			next.ServeHTTP(rec, r)
 
-			encodedBody, ok := encode(rec, r, re, compressionLevel, cacheStore, store, logger)
+			encodedBody, encoding, ok := encode(rec, r, re, zstdCompressionLevel, brotliCompressionLevel, preferEncoder, cacheStore, store, logger)
 			if !ok {
 				_ = rec.flush(w)
 				return
 			}
 
-			writeEncodedResponse(w, rec, encodedBody)
+			writeEncodedResponse(w, rec, encoding, encodedBody)
 		})
 	}
 }
@@ -93,28 +97,32 @@ func encode(
 	rec *responseRecorder,
 	r *http.Request,
 	re *regexp2.Regexp,
-	compressionLevel zstd.EncoderLevel,
+	zstdCompressionLevel zstd.EncoderLevel,
+	brotliCompressionLevel int,
+	preferEncoder config.Encoding,
 	cacheStore *CompressorCache,
 	store storage.Storage,
 	logger *zap.Logger,
-) ([]byte, bool) {
+) ([]byte, config.Encoding, bool) {
 	if reason, ok := isValidRequest(rec, r, re); !ok {
 		logger.Debug("skipping encoding", zap.String("reason", reason), zap.String("path", r.URL.Path))
-		return nil, false
+		return nil, "", false
 	}
 
 	if err := addHeaders(rec, r, re); err != nil {
 		logger.Error("error adding headers", zap.Error(err), zap.String("path", r.URL.Path))
-		return nil, false
+		return nil, "", false
 	}
 
-	// Проверяем, что клиент поддерживает dcz в заголовке Accept-Encoding
+	// Выбираем кодирование, которое поддерживает клиент: preferred имеет приоритет, затем fallback.
 	acceptEncoding := r.Header.Get("Accept-Encoding")
-	if !strings.Contains(acceptEncoding, "dcz") {
+	encoding, ok := negotiateEncoding(acceptEncoding, preferEncoder)
+	if !ok {
 		logger.Debug("skipping encoding",
-			zap.String("reason", "Accept-Encoding does not contain dcz"),
+			zap.String("reason", "Accept-Encoding does not contain supported encoding"),
+			zap.String("preferEncoder", string(preferEncoder)),
 			zap.String("acceptEncoding", acceptEncoding))
-		return nil, false
+		return nil, "", false
 	}
 
 	// Получаем хэш словаря
@@ -123,18 +131,63 @@ func encode(
 		logger.Debug("skipping encoding",
 			zap.String("reason", "Available-Dictionary header format is invalid"),
 			zap.String("availableDict", adValue))
-		return nil, false
+		return nil, "", false
 	}
 	adHash := extractAvailableDictionary(adValue)
 
-	compressor, err := getCompressor(adHash, compressionLevel, cacheStore, store)
+	compressor, err := getCompressor(adHash, zstdCompressionLevel, brotliCompressionLevel, encoding, cacheStore, store)
 	if err != nil {
 		logCompressorError(logger, err, adHash, r.URL.Path)
-		return nil, false
+		return nil, "", false
 	}
 
-	// Получаем тело ответа и сжимаем его
-	return compressor.Compress(rec.body.Bytes()), true
+	encodedBody := compressor.Compress(rec.body.Bytes())
+	if len(encodedBody) == 0 {
+		logger.Error("error compressing response", zap.String("path", r.URL.Path), zap.String("encoding", string(encoding)))
+		return nil, "", false
+	}
+
+	return encodedBody, encoding, true
+}
+
+func negotiateEncoding(acceptEncoding string, preferEncoder config.Encoding) (config.Encoding, bool) {
+	encodings := preferredEncodings(preferEncoder)
+	for _, encoding := range encodings {
+		if acceptsEncoding(acceptEncoding, encoding) {
+			return encoding, true
+		}
+	}
+	return "", false
+}
+
+func preferredEncodings(preferEncoder config.Encoding) []config.Encoding {
+	switch preferEncoder {
+	case config.DCB:
+		return []config.Encoding{config.DCB, config.DCZ}
+	default:
+		return []config.Encoding{config.DCZ, config.DCB}
+	}
+}
+
+func acceptsEncoding(acceptEncoding string, encoding config.Encoding) bool {
+	for token := range strings.SplitSeq(acceptEncoding, ",") {
+		parts := strings.Split(strings.TrimSpace(token), ";")
+		if len(parts) == 0 || strings.TrimSpace(parts[0]) != string(encoding) {
+			continue
+		}
+
+		accepted := true
+		for _, part := range parts[1:] {
+			key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if !ok || strings.TrimSpace(key) != "q" {
+				continue
+			}
+			q, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			accepted = err != nil || q > 0
+		}
+		return accepted
+	}
+	return false
 }
 
 // logCompressorError логирует ошибку получения компрессора с подходящим уровнем.
@@ -153,18 +206,18 @@ func logCompressorError(logger *zap.Logger, err error, adHash, path string) {
 	)
 }
 
-// writeEncodedResponse копирует заголовки из recorder, добавляет dcz-заголовки и отправляет сжатое тело.
-func writeEncodedResponse(w http.ResponseWriter, rec *responseRecorder, encodedBody []byte) {
+// writeEncodedResponse копирует заголовки из recorder, добавляет заголовки кодирования и отправляет сжатое тело.
+func writeEncodedResponse(w http.ResponseWriter, rec *responseRecorder, encoding config.Encoding, encodedBody []byte) {
 	for key, values := range rec.header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-	w.Header().Set("Content-Encoding", "dcz")
+	w.Header().Set("Content-Encoding", string(encoding))
 	w.Header().Set("Content-Length", strconv.Itoa(len(encodedBody)))
 
 	w.WriteHeader(rec.statusCode)
-	// #nosec G705 -- writing dcz-compressed binary payload, not interpretable as HTML
+	// #nosec G705 -- writing compressed binary payload, not interpretable as HTML
 	_, _ = w.Write(encodedBody)
 }
 
@@ -254,11 +307,14 @@ func getMatchPattern(pathStr string, re *regexp2.Regexp) (string, error) {
 
 func getCompressor(
 	hashDict string,
-	compressionLevel zstd.EncoderLevel,
+	zstdCompressionLevel zstd.EncoderLevel,
+	brotliCompressionLevel int,
+	encoding config.Encoding,
 	cacheStore *CompressorCache,
 	storage storage.Storage,
 ) (delta.Compressor, error) {
-	if compressor, ok := cacheStore.Get(hashDict); ok {
+	cacheKey := fmt.Sprintf("%s:zstd=%d:brotli=%d:%s", encoding, zstdCompressionLevel, brotliCompressionLevel, hashDict)
+	if compressor, ok := cacheStore.Get(cacheKey); ok {
 		return compressor, nil
 	}
 
@@ -267,14 +323,25 @@ func getCompressor(
 		return nil, err
 	}
 
-	compressor, err := dcz.NewCompressor(dictionary, compressionLevel)
+	var compressor delta.Compressor
+	switch encoding {
+	case config.DCZ:
+		compressor, err = dcz.NewCompressor(dictionary, zstdCompressionLevel)
+	case config.DCB:
+		if brotliCompressionLevel < 2 || brotliCompressionLevel > 11 {
+			return nil, fmt.Errorf("brotli dictionary compression level must be between 2 and 11: %d", brotliCompressionLevel)
+		}
+		compressor, err = dcb.NewCompressor(dictionary, brotliCompressionLevel)
+	default:
+		return nil, fmt.Errorf("unsupported encoding: %s", encoding)
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	go func(hashDict string, compressor delta.Compressor) {
-		cacheStore.Add(hashDict, compressor)
-	}(hashDict, compressor)
+	go func(cacheKey string, compressor delta.Compressor) {
+		cacheStore.Add(cacheKey, compressor)
+	}(cacheKey, compressor)
 
 	return compressor, nil
 }

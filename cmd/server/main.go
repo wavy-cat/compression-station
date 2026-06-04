@@ -112,7 +112,7 @@ func setupRouting(
 
 	for _, path := range cfg.Paths {
 		r.Route(path, func(r chi.Router) {
-			r.Use(encoder.Encoder(store, cache, cfg.FilePattern, cfg.CompressionLevel, logger))
+			r.Use(encoder.Encoder(store, cache, cfg.FilePattern, cfg.ZstdCompressionLevel, cfg.BrotliCompressionLevel, cfg.PreferEncoder, logger))
 			r.Get("/*", fetcherFunc)
 		})
 	}
