@@ -80,7 +80,17 @@ func Encoder(
 
 			next.ServeHTTP(rec, r)
 
-			encodedBody, encoding, ok := encode(rec, r, re, zstdCompressionLevel, brotliCompressionLevel, preferEncoder, cacheStore, store, logger)
+			encodedBody, encoding, ok := encode(
+				rec,
+				r,
+				re,
+				zstdCompressionLevel,
+				brotliCompressionLevel,
+				preferEncoder,
+				cacheStore,
+				store,
+				logger,
+			)
 			if !ok {
 				_ = rec.flush(w)
 				return
@@ -143,7 +153,11 @@ func encode(
 
 	encodedBody := compressor.Compress(rec.body.Bytes())
 	if len(encodedBody) == 0 {
-		logger.Error("error compressing response", zap.String("path", r.URL.Path), zap.String("encoding", string(encoding)))
+		logger.Error(
+			"error compressing response",
+			zap.String("path", r.URL.Path),
+			zap.String("encoding", string(encoding)),
+		)
 		return nil, "", false
 	}
 
@@ -164,6 +178,8 @@ func preferredEncodings(preferEncoder config.Encoding) []config.Encoding {
 	switch preferEncoder {
 	case config.DCB:
 		return []config.Encoding{config.DCB, config.DCZ}
+	case config.DCZ:
+		return []config.Encoding{config.DCZ, config.DCB}
 	default:
 		return []config.Encoding{config.DCZ, config.DCB}
 	}
@@ -329,7 +345,10 @@ func getCompressor(
 		compressor, err = dcz.NewCompressor(dictionary, zstdCompressionLevel)
 	case config.DCB:
 		if brotliCompressionLevel < 2 || brotliCompressionLevel > 11 {
-			return nil, fmt.Errorf("brotli dictionary compression level must be between 2 and 11: %d", brotliCompressionLevel)
+			return nil, fmt.Errorf(
+				"brotli dictionary compression level must be between 2 and 11: %d",
+				brotliCompressionLevel,
+			)
 		}
 		compressor, err = dcb.NewCompressor(dictionary, brotliCompressionLevel)
 	default:

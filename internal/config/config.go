@@ -31,11 +31,12 @@ type Logger struct {
 }
 
 type Encoder struct {
-	FilePattern            string            `yaml:"file_pattern"              env:"FILE_PATTERN"              env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
-	Paths                  []string          `yaml:"paths"                     env:"PATHS"                     env-required:"true"` // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
-	PreferEncoder          Encoding          `yaml:"prefer_encoder"            env:"PREFER_ENCODER"            env-default:"dcz"`
-	ZstdCompressionLevel   zstd.EncoderLevel `yaml:"zstd_compression_level"    env:"ZSTD_COMPRESSION_LEVEL"    env-default:"2"`
-	BrotliCompressionLevel int               `yaml:"brotli_compression_level"  env:"BROTLI_COMPRESSION_LEVEL"  env-default:"6"`
+	FilePattern string   `yaml:"file_pattern" env:"FILE_PATTERN" env-required:"true"` // регулярное выражение, которому должно соответствовать полное название файла, чтобы быть обработанным
+	Paths       []string `yaml:"paths"        env:"PATHS"        env-required:"true"` // начало путей директорий, которые должны быть обработаны (e.g. `/_astro`, `/css`)
+
+	PreferEncoder          Encoding          `yaml:"prefer_encoder"           env:"PREFER_ENCODER"           env-default:"dcz"`
+	ZstdCompressionLevel   zstd.EncoderLevel `yaml:"zstd_compression_level"   env:"ZSTD_COMPRESSION_LEVEL"   env-default:"2"`
+	BrotliCompressionLevel int               `yaml:"brotli_compression_level" env:"BROTLI_COMPRESSION_LEVEL" env-default:"6"`
 } // TODO: добавить excluded paths
 
 type Storage struct {
