@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -169,7 +170,7 @@ func main() {
 	r := setupRouting(cfg, logger, store, compressorCache)
 
 	// web server
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	addr := net.JoinHostPort(cfg.Server.Host, fmt.Sprint(cfg.Server.Port))
 	srv := &http.Server{
 		Addr:         addr,
 		WriteTimeout: cfg.Timeouts.Write,
