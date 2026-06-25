@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"github.com/go-chi/chi/v5"
@@ -170,7 +171,7 @@ func main() {
 	r := setupRouting(cfg, logger, store, compressorCache)
 
 	// web server
-	addr := net.JoinHostPort(cfg.Server.Host, fmt.Sprint(cfg.Server.Port))
+	addr := net.JoinHostPort(cfg.Server.Host, strconv.FormatUint(uint64(cfg.Server.Port), 10))
 	srv := &http.Server{
 		Addr:         addr,
 		WriteTimeout: cfg.Timeouts.Write,
