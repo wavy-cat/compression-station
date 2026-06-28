@@ -32,24 +32,51 @@ var (
 	commit  = "none"
 )
 
-func parseCliArgs() string {
+type cliArgs struct {
+	compressDest string
+	compressMode bool
+	compressSrc  string
+	configPath   string
+	showVersion  bool
+}
+
+func parseCliArgs() cliArgs {
+	args := os.Args[1:]
+	if len(args) == 3 && args[0] == "-compress" {
+		return cliArgs{
+			compressDest: args[2],
+			compressMode: true,
+			compressSrc:  args[1],
+		}
+	}
+
 	configPath := flag.String("c", "config.yml", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
-	if *showVersion {
-		fmt.Printf("compression-station %s %s (%s %s/%s)\n", //nolint:forbidigo // intentional version output to stdout
-			version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-		os.Exit(0)
+	return cliArgs{
+		configPath:  *configPath,
+		showVersion: *showVersion,
 	}
-
-	return *configPath
 }
 
-func getLogger(cfg config.Logger) *zap.Logger {
+func printVersion() {
+	fmt.Printf("compression-station %s %s (%s %s/%s)\n", //nolint:forbidigo // intentional version output to stdout
+		version, commit, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+}
+
+func newBootstrapLogger() *zap.Logger {
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		return zap.NewNop()
+	}
+	return logger
+}
+
+func getLogger(cfg config.Logger) (*zap.Logger, error) {
 	level, err := zap.ParseAtomicLevel(cfg.Level)
 	if err != nil {
-		panic(fmt.Sprintf("invalid log level: %v", err))
+		return nil, fmt.Errorf("invalid log level: %w", err)
 	}
 
 	var zapConfig zap.Config
@@ -65,9 +92,9 @@ func getLogger(cfg config.Logger) *zap.Logger {
 
 	logger, err := zapConfig.Build()
 	if err != nil {
-		panic(fmt.Sprintf("failed to build logger: %v", err))
+		return nil, fmt.Errorf("failed to build logger: %w", err)
 	}
-	return logger
+	return logger, nil
 }
 
 func getStorage(cfg config.Storage) (storage.Storage, error) {
@@ -132,45 +159,59 @@ func setupRouting(
 	return r
 }
 
-func main() {
-	// cli args
-	configPath := parseCliArgs()
+func run() int {
+	bootstrapLogger := newBootstrapLogger()
+	defer func() { _ = bootstrapLogger.Sync() }()
 
-	// config
-	cfg, err := config.GetConfig(configPath)
-	if err != nil {
-		panic(err)
+	args := parseCliArgs()
+	if args.showVersion {
+		printVersion()
+		return 0
+	}
+	if args.compressMode {
+		if err := runCompression(args.compressSrc, args.compressDest); err != nil {
+			bootstrapLogger.Error("compression failed", zap.Error(err))
+			return 1
+		}
+		return 0
 	}
 
-	// logger
-	logger := getLogger(cfg.Logger)
-	defer func(logger *zap.Logger) {
-		_ = logger.Sync()
-	}(logger)
+	cfg, err := config.GetConfig(args.configPath)
+	if err != nil {
+		bootstrapLogger.Error("failed to read config", zap.Error(err))
+		return 1
+	}
 
-	// storage
+	logger, err := getLogger(cfg.Logger)
+	if err != nil {
+		bootstrapLogger.Error("failed to initialize logger", zap.Error(err))
+		return 1
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
 	store, err := getStorage(cfg.Storage)
 	if err != nil {
-		logger.Fatal("failed to initialize storage", zap.Error(err))
+		logger.Error("failed to initialize storage", zap.Error(err))
+		return 1
 	}
-	defer func(store storage.Storage) {
-		if err = store.Close(); err != nil {
-			logger.Error("Failed to close storage", zap.Error(err))
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			logger.Error("Failed to close storage", zap.Error(closeErr))
 		}
-	}(store)
+	}()
 
-	// cache
 	compressorCache, err := lru.NewWithEvict(cfg.Size, func(_ string, value delta.Compressor) {
 		value.Release()
 	})
 	if err != nil {
-		logger.Fatal("Failed to create cache", zap.Error(err))
+		logger.Error("Failed to create cache", zap.Error(err))
+		return 1
 	}
 
-	// routing
 	r := setupRouting(cfg, logger, store, compressorCache)
 
-	// web server
 	addr := net.JoinHostPort(cfg.Server.Host, strconv.FormatUint(uint64(cfg.Server.Port), 10))
 	srv := &http.Server{
 		Addr:         addr,
@@ -183,7 +224,6 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	// start server
 	logger.Info("Starting server...", zap.String("addr", addr))
 	go func() {
 		if err = srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -191,7 +231,6 @@ func main() {
 		}
 	}()
 
-	// stop server
 	<-stop
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeouts.Shutdown)
@@ -202,4 +241,9 @@ func main() {
 		logger.Fatal("Server shutdown failed", zap.Error(err))
 	}
 	logger.Info("Server stopped gracefully")
+	return 0
+}
+
+func main() {
+	os.Exit(run())
 }

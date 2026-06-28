@@ -13,6 +13,7 @@ import (
 	"github.com/dlclark/regexp2/v2"
 	"github.com/klauspost/compress/zstd"
 	"github.com/wavy-cat/compression-station/internal/config"
+	"github.com/wavy-cat/compression-station/pkg/content"
 	"github.com/wavy-cat/compression-station/pkg/delta"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcb"
 	"github.com/wavy-cat/compression-station/pkg/delta/dcz"
@@ -273,7 +274,7 @@ func isValidRequest(rec *responseRecorder, r *http.Request, re *regexp2.Regexp) 
 	mimeType = strings.TrimSpace(mimeType)
 
 	// Проверяем, допускает ли MIME-тип сжатие
-	if !isMimeAllowed(mimeType) {
+	if !content.IsAllowedMimeType(mimeType) {
 		return "MIME type not allowed", false
 	}
 
@@ -375,8 +376,4 @@ func escapeGlob(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
-}
-
-func isMimeAllowed(mimeType string) bool {
-	return slices.Contains(allowedMimeTypes, mimeType)
 }
