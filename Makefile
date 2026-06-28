@@ -7,6 +7,9 @@ all: build
 build:
 	go build -trimpath -ldflags="-s -w" -o server github.com/wavy-cat/compression-station/cmd/server
 
+run:
+	go run github.com/wavy-cat/compression-station/cmd/server
+
 lint:
 	golangci-lint run
 
