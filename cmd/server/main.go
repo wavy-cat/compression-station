@@ -159,33 +159,31 @@ func setupRouting(
 	return r
 }
 
-func run() int {
+func main() {
 	bootstrapLogger := newBootstrapLogger()
 	defer func() { _ = bootstrapLogger.Sync() }()
 
 	args := parseCliArgs()
 	if args.showVersion {
 		printVersion()
-		return 0
+		os.Exit(0)
 	}
+
 	if args.compressMode {
 		if err := runCompression(args.compressSrc, args.compressDest); err != nil {
-			bootstrapLogger.Error("compression failed", zap.Error(err))
-			return 1
+			bootstrapLogger.Fatal("compression failed", zap.Error(err))
 		}
-		return 0
+		os.Exit(0)
 	}
 
 	cfg, err := config.GetConfig(args.configPath)
 	if err != nil {
-		bootstrapLogger.Error("failed to read config", zap.Error(err))
-		return 1
+		bootstrapLogger.Fatal("failed to read config", zap.Error(err))
 	}
 
 	logger, err := getLogger(cfg.Logger)
 	if err != nil {
-		bootstrapLogger.Error("failed to initialize logger", zap.Error(err))
-		return 1
+		bootstrapLogger.Fatal("failed to initialize logger", zap.Error(err))
 	}
 	defer func() {
 		_ = logger.Sync()
@@ -193,8 +191,7 @@ func run() int {
 
 	store, err := getStorage(cfg.Storage)
 	if err != nil {
-		logger.Error("failed to initialize storage", zap.Error(err))
-		return 1
+		logger.Fatal("failed to initialize storage", zap.Error(err))
 	}
 	defer func() {
 		if closeErr := store.Close(); closeErr != nil {
@@ -206,8 +203,7 @@ func run() int {
 		value.Release()
 	})
 	if err != nil {
-		logger.Error("Failed to create cache", zap.Error(err))
-		return 1
+		logger.Fatal("Failed to create cache", zap.Error(err))
 	}
 
 	r := setupRouting(cfg, logger, store, compressorCache)
@@ -241,9 +237,4 @@ func run() int {
 		logger.Fatal("Server shutdown failed", zap.Error(err))
 	}
 	logger.Info("Server stopped gracefully")
-	return 0
-}
-
-func main() {
-	os.Exit(run())
 }
