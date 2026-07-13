@@ -166,14 +166,14 @@ func main() {
 	args := parseCliArgs()
 	if args.showVersion {
 		printVersion()
-		os.Exit(0)
+		return
 	}
 
 	if args.compressMode {
 		if err := runCompression(args.compressSrc, args.compressDest); err != nil {
 			bootstrapLogger.Fatal("compression failed", zap.Error(err))
 		}
-		os.Exit(0)
+		return
 	}
 
 	cfg, err := config.GetConfig(args.configPath)
