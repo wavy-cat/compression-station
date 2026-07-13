@@ -124,5 +124,5 @@ func DetectMimeType(path string, data []byte) string {
 func HashName(data []byte) string {
 	sum := sha256.Sum256(data)
 	encoded := base64.StdEncoding.EncodeToString(sum[:])
-	return strings.NewReplacer("/", "+", "+", "-").Replace(encoded)
+	return strings.NewReplacer("/", "_", "+", "-").Replace(encoded)
 }

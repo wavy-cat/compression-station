@@ -241,8 +241,7 @@ func writeEncodedResponse(w http.ResponseWriter, rec *responseRecorder, encoding
 // extractAvailableDictionary removes surrounding ':' markers from Available-Dictionary and normalizes base64url chars.
 func extractAvailableDictionary(headerValue string) string {
 	availableDictHash := headerValue[1 : len(headerValue)-1]
-	availableDictHash = strings.ReplaceAll(availableDictHash, "/", "_")
-	availableDictHash = strings.ReplaceAll(availableDictHash, "+", "-")
+	availableDictHash = strings.NewReplacer("/", "_", "+", "-").Replace(availableDictHash)
 	return availableDictHash
 }
 
