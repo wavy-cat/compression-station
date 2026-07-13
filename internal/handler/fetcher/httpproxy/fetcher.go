@@ -1,4 +1,4 @@
-package fetcher
+package httpproxy
 
 import (
 	"net/http"

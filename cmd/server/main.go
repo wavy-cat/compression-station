@@ -17,7 +17,8 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/wavy-cat/compression-station/internal/config"
-	"github.com/wavy-cat/compression-station/internal/handler/fetcher"
+	"github.com/wavy-cat/compression-station/internal/handler/fetcher/fileserver"
+	"github.com/wavy-cat/compression-station/internal/handler/fetcher/httpproxy"
 	"github.com/wavy-cat/compression-station/internal/middleware/encoder"
 	logMiddleware "github.com/wavy-cat/compression-station/internal/middleware/logger"
 	"github.com/wavy-cat/compression-station/pkg/delta"
@@ -121,6 +122,26 @@ func getStorage(cfg config.Storage) (storage.Storage, error) {
 	return store, nil
 }
 
+func getFetcher(cfg config.Config) (http.HandlerFunc, error) {
+	switch cfg.Origin.Local {
+	case true:
+		if cfg.Origin.Path == "" {
+			return nil, errors.New("Origin.Path must not be empty")
+		}
+		return fileserver.Fetcher(cfg.Path)
+	default:
+		if cfg.Origin.Url.Scheme == "" || cfg.Origin.Url.Host == "" {
+			return nil, errors.New("Origin.Url must contain scheme and host")
+		}
+
+		if cfg.Origin.Url.Scheme != "http" && cfg.Origin.Url.Scheme != "https" {
+			return nil, errors.New("Origin.Url must use http or https")
+		}
+
+		return httpproxy.Fetcher(&cfg.Origin.Url.URL)
+	}
+}
+
 func setupRouting(
 	cfg config.Config,
 	logger *zap.Logger,
@@ -134,7 +155,7 @@ func setupRouting(
 		r.Use(chiMiddleware.Heartbeat(cfg.Heartbeat.Path))
 	}
 
-	fetcherFunc, err := fetcher.Fetcher(&cfg.Url.URL)
+	fetcherFunc, err := getFetcher(cfg)
 	if err != nil {
 		logger.Fatal("failed to create feather", zap.Error(err))
 	}

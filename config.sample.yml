@@ -40,4 +40,9 @@ cache:
   size: 1024
 
 origin:
-  url: "http://127.0.0.1:8080"
+  # Определяет способ получения файлов.
+  # true — использовать локальный fileserver, путь к директории берётся из path.
+  # false — использовать HTTP-proxy: HTTP-адрес берётся из url.
+  local: true
+  path: "./static" # используется при local: true
+  url: "http://127.0.0.1:8080" # используется при local: false

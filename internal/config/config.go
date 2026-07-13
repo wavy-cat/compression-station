@@ -3,6 +3,8 @@ package config
 import (
 	"time"
 
+	"github.com/wavy-cat/compression-station/pkg/url"
+
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -69,7 +71,9 @@ type CacheRedis struct {
 }
 
 type Origin struct {
-	Url URL `yaml:"url" env:"ORIGIN_URL" env-required:"true"` //nolint:revive,staticcheck // cleanenv not support pure url
+	Url   url.URL `yaml:"url"   env:"ORIGIN_URL"` //nolint:revive,staticcheck // cleanenv not support pure url
+	Path  string  `yaml:"path"  env:"ORIGIN_PATH"`
+	Local bool    `yaml:"local" env:"ORIGIN_LOCAL" env-default:"true"`
 }
 
 type Config struct {
