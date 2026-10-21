@@ -11,7 +11,7 @@ require (
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/ilyakaznacheev/cleanenv v1.5.0
-	github.com/klauspost/compress v1.18.6
+	github.com/klauspost/compress v1.18.7
 	github.com/molecule-man/go-brrr v0.5.1
 	go.uber.org/zap v1.28.0
 	gopkg.in/yaml.v3 v3.0.1
